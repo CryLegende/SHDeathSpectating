@@ -1,0 +1,12 @@
+spectatingDuration: 6 # Durée du mode spectateur en secondes
+expLossPercentage: 10 # En pourcentage, donc la le joueur perdra 10% de son exp
+deathSubtitle: '&8&l« &c&lVous êtes mort &8&l»' # Sous-titre affiché à la mort
+spawnCommand: spawn %player% # Commande pour la réapparition
+deathMessage: '&7&l« &c&lSH &8&l» &cVous êtes morts&7, réapparition dans &c{time}
+  secondes' # Message de mort
+commandBlockedMessage: '&cVous ne pouvez pas exécuter de commandes en étant mort.'
+worldWhitelist:
+- arene
+- donjons
+- SuperiorWorld
+deathSound: ENTITY_ENDER_DRAGON_GROWL
