@@ -1,5 +1,7 @@
 package org.Cry_Legende.sHDeathSpectating;
 
+import org.bukkit.damage.DamageType;
+import org.bukkit.damage.DamageSource;
 import com.comphenix.protocol.PacketType;
 import com.comphenix.protocol.ProtocolLibrary;
 import com.comphenix.protocol.events.ListenerPriority;
@@ -427,7 +429,7 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
             player.teleport(spawnWorld.getSpawnLocation());
         }
 
-        player.setHealth(player.getAttribute(org.bukkit.attribute.Attribute.GENERIC_MAX_HEALTH).getValue());
+        player.setHealth(player.getAttribute(org.bukkit.attribute.Attribute.MAX_HEALTH).getValue());
         player.setFoodLevel(20);
         player.setSaturation(5.0F);
 
@@ -458,17 +460,8 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
     // Le constructeur (Player, List, int, String) n'existe plus en 1.21 : on passe par celui avec
     // DamageSource (API 1.20.4+) quand il est disponible, sinon on garde l'ancien (Opale 1.20.2).
     private static PlayerDeathEvent createDeathEvent(Player player, List<ItemStack> drops) {
-        try {
-            Class<?> damageSource = Class.forName("org.bukkit.damage.DamageSource");
-            Class<?> damageType = Class.forName("org.bukkit.damage.DamageType");
-            Object builder = damageSource.getMethod("builder", damageType).invoke(null, damageType.getField("GENERIC").get(null));
-            Object source = Class.forName("org.bukkit.damage.DamageSource$Builder").getMethod("build").invoke(builder);
-            return PlayerDeathEvent.class
-                .getConstructor(Player.class, damageSource, List.class, int.class, String.class)
-                .newInstance(player, source, drops, 0, "");
-        } catch (ReflectiveOperationException ignored) {
-            return new PlayerDeathEvent(player, drops, 0, "");
-        }
+        DamageSource source = DamageSource.builder(DamageType.GENERIC).build();
+        return new PlayerDeathEvent(player, source, drops, 0, "");
     }
 
     private int getTotalExperience(Player player) {
