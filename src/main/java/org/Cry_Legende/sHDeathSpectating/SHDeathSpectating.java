@@ -11,6 +11,7 @@ import com.comphenix.protocol.events.PacketEvent;
 import com.comphenix.protocol.wrappers.EnumWrappers;
 import com.comphenix.protocol.wrappers.PlayerInfoData;
 import com.comphenix.protocol.wrappers.WrappedGameProfile;
+import net.kyori.adventure.text.Component;
 import org.bukkit.*;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.configuration.file.YamlConfiguration;
@@ -37,6 +38,8 @@ import org.bukkit.scheduler.BukkitRunnable;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Level;
@@ -66,6 +69,10 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
     private Map<UUID, Float> lastPlayerPitch = new HashMap<>();
     private File spectatingFile;
     private FileConfiguration spectatingConfig;
+    // Écritures de spectating.yml : numérotées pour qu'une ancienne n'écrase pas une plus récente
+    private final Object saveLock = new Object();
+    private long saveVersion;
+    private long savedVersion;
 
     @Override
     public void onEnable() {
@@ -74,6 +81,19 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
         Bukkit.getPluginManager().registerEvents(this, this);
         createSpectatingFile();
         registerProtocolListeners();
+    }
+
+    @Override
+    public void onDisable() {
+        // Les ArmorStand de camera ne doivent pas rester dans le monde apres un arret ou un rechargement
+        for (ArmorStand stand : playerStands.values()) {
+            stand.eject();
+            stand.remove();
+        }
+        playerStands.clear();
+        if (spectatingConfig != null) {
+            writeSpectating(spectatingConfig.saveToString(), ++saveVersion);
+        }
     }
 
     private void registerProtocolListeners() {
@@ -129,9 +149,30 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
         spawnCommand = config.getString("spawnCommand", "/spawn %player%");
         deathMessage = ChatColor.translateAlternateColorCodes('&', config.getString("deathMessage", "&7&l« &c&lSH &8&l» &cVous êtes morts&7, réapparition dans &c{time} secondes"));
         commandBlockedMessage = ChatColor.translateAlternateColorCodes('&', config.getString("commandBlockedMessage", "&cVous ne pouvez pas exécuter de commandes en étant mort."));
-        deathSound = Sound.valueOf(config.getString("deathSound", "ENTITY_ENDER_DRAGON_GROWL"));
+        deathSound = sound(config.getString("deathSound", "ENTITY_ENDER_DRAGON_GROWL"));
+        if (deathSound == null) {
+            getLogger().warning("deathSound invalide : " + config.getString("deathSound") + ", ENTITY_ENDER_DRAGON_GROWL utilisé.");
+            deathSound = Sound.ENTITY_ENDER_DRAGON_GROWL;
+        }
         hideSpectatorMenu = config.getBoolean("hideSpectatorMenu", true);
         worldWhitelist = new HashSet<>(config.getStringList("worldWhitelist"));
+    }
+
+    /**
+     * Son lu en config : ancien nom (ENTITY_PLAYER_LEVELUP) ou clé (minecraft:entity.player.levelup).
+     */
+    static Sound sound(String raw) {
+        if (raw == null || raw.isBlank()) return null;
+        String s = raw.trim();
+        if (s.indexOf(':') >= 0 || s.indexOf('.') >= 0) {
+            NamespacedKey key = NamespacedKey.fromString(s.toLowerCase(Locale.ROOT));
+            return key == null ? null : Registry.SOUND_EVENT.get(key);
+        }
+        try {
+            return (Sound) Sound.class.getField(s.toUpperCase(Locale.ROOT)).get(null);
+        } catch (ReflectiveOperationException | ClassCastException e) {
+            return null;
+        }
     }
 
     private void createSpectatingFile() {
@@ -148,13 +189,23 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
     }
 
     private void saveSpectatingConfig() {
-        Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
+        // Sérialisé ici, sur le thread principal : la configuration est modifiée par les événements,
+        // la parcourir depuis le thread asynchrone provoquait des accès concurrents
+        final String data = spectatingConfig.saveToString();
+        final long version = ++saveVersion;
+        Bukkit.getScheduler().runTaskAsynchronously(this, () -> writeSpectating(data, version));
+    }
+
+    private void writeSpectating(String data, long version) {
+        synchronized (saveLock) {
+            if (version < savedVersion) return;
+            savedVersion = version;
             try {
-                spectatingConfig.save(spectatingFile);
+                Files.writeString(spectatingFile.toPath(), data, StandardCharsets.UTF_8);
             } catch (IOException e) {
-                e.printStackTrace();
+                getLogger().log(Level.WARNING, "Impossible d'écrire spectating.yml", e);
             }
-        });
+        }
     }
 
     @EventHandler
@@ -196,7 +247,8 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
         }
 
         List<ItemStack> playerInventoryItems = new ArrayList<>();
-        for (ItemStack item : player.getInventory().getContents()) {
+        // getContents() renvoie aussi l'armure et la main secondaire, ajoutées plus bas : on ne prend que le stockage
+        for (ItemStack item : player.getInventory().getStorageContents()) {
             if (item != null && item.getType() != Material.AIR) {
                 playerInventoryItems.add(item.clone());
             }
@@ -214,7 +266,7 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
         int totalExp = getTotalExperience(player);
         int expToDropBasedOnConfig = (int) (totalExp * (expLossPercentage / 100.0));
         PlayerDeathEvent deathEvent = createDeathEvent(player, playerInventoryItems);
-        if (!player.getWorld().getGameRuleValue(GameRule.KEEP_INVENTORY)) {
+        if (!player.getWorld().getGameRuleValue(GameRules.KEEP_INVENTORY)) {
             deathEvent.setDroppedExp(expToDropBasedOnConfig);
         }
 
@@ -224,7 +276,7 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
         player.sendMessage(deathMessage.replace("{time}", String.valueOf(spectatingDuration / 20)));
         immobilizePlayer(player); // Cette méthode s'occupe de l'ArmorStand et du spectating
 
-        boolean effectiveKeepInventory = player.getWorld().getGameRuleValue(GameRule.KEEP_INVENTORY) || deathEvent.getKeepInventory();
+        boolean effectiveKeepInventory = player.getWorld().getGameRuleValue(GameRules.KEEP_INVENTORY) || deathEvent.getKeepInventory();
 
         if (!effectiveKeepInventory) {
             if (!deathEvent.getDrops().isEmpty()) {
@@ -259,6 +311,8 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
         // Crée une nouvelle variable Location qui est 1.5 bloc au-dessus des pieds du joueur.
         Location spawnLocation = player.getLocation().add(0, 1.5, 0);
         ArmorStand armorStand = player.getWorld().spawn(spawnLocation, ArmorStand.class);
+        // Jamais écrit sur disque : un arrêt du serveur ne laisse pas de caméra orpheline dans le monde
+        armorStand.setPersistent(false);
 
         armorStand.setVisible(false);
         armorStand.setGravity(false);
@@ -457,11 +511,10 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
         }
     }
 
-    // Le constructeur (Player, List, int, String) n'existe plus en 1.21 : on passe par celui avec
-    // DamageSource (API 1.20.4+) quand il est disponible, sinon on garde l'ancien (Opale 1.20.2).
+    // Événement de mort « de notification » : message vide, le constructeur à message Component remplace celui à String.
     private static PlayerDeathEvent createDeathEvent(Player player, List<ItemStack> drops) {
         DamageSource source = DamageSource.builder(DamageType.GENERIC).build();
-        return new PlayerDeathEvent(player, source, drops, 0, "");
+        return new PlayerDeathEvent(player, source, drops, 0, Component.empty(), true);
     }
 
     private int getTotalExperience(Player player) {
@@ -526,6 +579,8 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
     @EventHandler
     public void onPlayerQuit(PlayerQuitEvent event) {
         UUID playerId = event.getPlayer().getUniqueId();
+        // Dernier attaquant retenu à chaque coup reçu : sans ce retrait, l'entité restait référencée après le départ
+        playerAttackers.remove(playerId);
         if (playerLocations.containsKey(playerId)) {
             if (respawnTasks.containsKey(playerId)) respawnTasks.remove(playerId).cancel();
             if (cameraLockTasks.containsKey(playerId)) cameraLockTasks.remove(playerId).cancel();
