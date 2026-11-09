@@ -46,6 +46,18 @@ import java.util.logging.Level;
 
 public class SHDeathSpectating extends JavaPlugin implements Listener {
 
+    /**
+     * Fil principal du serveur, relevé à l'activation. Avec les ticks de mondes en parallèle (DivineMC), les fils des
+     * mondes sont aussi des fils de tick : Bukkit.isPrimaryThread() y répond vrai, il ne sert donc pas à les distinguer.
+     */
+    private static volatile Thread serverThread;
+
+    /** Vrai uniquement sur le fil principal du serveur (jamais sur le fil d'un monde ou d'une région). */
+    public static boolean onServerThread() {
+        return Thread.currentThread() == serverThread;
+    }
+
+
     private int spectatingDuration;
     private int expLossPercentage;
     private boolean hideSpectatorMenu;
@@ -79,6 +91,7 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
 
     @Override
     public void onEnable() {
+        serverThread = Thread.currentThread();
         this.saveDefaultConfig();
         loadConfiguration();
         Bukkit.getPluginManager().registerEvents(this, this);
@@ -226,7 +239,7 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
 
         if (player.getHealth() - event.getFinalDamage() <= 0) {
             event.setCancelled(true);
-            if (Bukkit.isPrimaryThread()) {
+            if (onServerThread()) {
                 processDeath(player, event.getCause());
                 return;
             }
