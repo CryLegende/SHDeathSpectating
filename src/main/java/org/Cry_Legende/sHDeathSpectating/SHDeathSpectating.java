@@ -55,18 +55,21 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
     private String commandBlockedMessage;
     private Sound deathSound;
     private Set<String> worldWhitelist;
-    private Map<UUID, Location> playerLocations = new HashMap<>();
-    private Map<UUID, Entity> playerAttackers = new HashMap<>();
-    private Map<UUID, BukkitRunnable> respawnTasks = new HashMap<>();
-    private Map<UUID, BukkitRunnable> cameraLockTasks = new HashMap<>();
-    private Map<UUID, ArmorStand> playerStands = new HashMap<>();
+    // Lues et écrites aussi depuis le thread d'un monde (dégâts reçus pendant son tick), d'où les collections concurrentes.
+    private final Map<UUID, Location> playerLocations = new ConcurrentHashMap<>();
+    private final Map<UUID, Entity> playerAttackers = new ConcurrentHashMap<>();
+    private final Map<UUID, BukkitRunnable> respawnTasks = new ConcurrentHashMap<>();
+    private final Map<UUID, BukkitRunnable> cameraLockTasks = new ConcurrentHashMap<>();
+    private final Map<UUID, ArmorStand> playerStands = new ConcurrentHashMap<>();
     // Lu depuis les listeners ProtocolLib (thread netty), d'où la collection concurrente.
     private final Set<UUID> spectatingPlayers = ConcurrentHashMap.newKeySet();
     private boolean spectatorMaskFailed = false;
     // lastAttackerLocations n'est pas utilisé, peut être retiré si souhaité
-    private Map<UUID, Location> lastAttackerLocations = new HashMap<>();
-    private Map<UUID, Float> lastPlayerYaw = new HashMap<>();
-    private Map<UUID, Float> lastPlayerPitch = new HashMap<>();
+    private final Map<UUID, Location> lastAttackerLocations = new ConcurrentHashMap<>();
+    private final Map<UUID, Float> lastPlayerYaw = new ConcurrentHashMap<>();
+    private final Map<UUID, Float> lastPlayerPitch = new ConcurrentHashMap<>();
+    // Morts en attente du thread principal : un second coup mortel dans le même tick ne les relance pas.
+    private final Set<UUID> pendingDeaths = ConcurrentHashMap.newKeySet();
     private File spectatingFile;
     private FileConfiguration spectatingConfig;
     // Écritures de spectating.yml : numérotées pour qu'une ancienne n'écrase pas une plus récente
@@ -223,9 +226,26 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
 
         if (player.getHealth() - event.getFinalDamage() <= 0) {
             event.setCancelled(true);
-            handlePlayerDeath(player, event.getCause());
-            scheduleRespawnAndFollowTasks(player);
+            if (Bukkit.isPrimaryThread()) {
+                processDeath(player, event.getCause());
+                return;
+            }
+            // Dégâts reçus pendant le tick d'un monde : la mort (gamemode, caméra, inventaire, événement de mort) passe par le thread principal
+            UUID playerId = player.getUniqueId();
+            if (!pendingDeaths.add(playerId)) return;
+            final EntityDamageEvent.DamageCause cause = event.getCause();
+            Bukkit.getScheduler().runTask(this, () -> {
+                pendingDeaths.remove(playerId);
+                if (player.isOnline()) {
+                    processDeath(player, cause);
+                }
+            });
         }
+    }
+
+    private void processDeath(Player player, EntityDamageEvent.DamageCause cause) {
+        handlePlayerDeath(player, cause);
+        scheduleRespawnAndFollowTasks(player);
     }
 
     private void handlePlayerDeath(Player player, EntityDamageEvent.DamageCause cause) {
