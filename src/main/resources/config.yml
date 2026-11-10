@@ -1,3 +1,21 @@
+# ======================================================================== #
+# SHDeathSpectating
+#
+# Plugin : remplace l'écran de mort. Un joueur qui meurt dans un monde de worldWhitelist passe quelques
+# secondes en spectateur, caméra fixée au point de sa mort, puis réapparaît (commande de spawn, vie pleine).
+# L'exp perdue est lâchée au sol. Avec SHNetwork, l'état « mort » est partagé entre les serveurs : un joueur
+# qui change de serveur pendant ces secondes réapparaît à son arrivée (voir la section 'reseau' en bas du fichier).
+#
+# Commandes :
+#   /shdeathspectating import   Copie les morts de spectating.yml dans la base partagée (mode réseau, une seule fois).
+#
+# Permissions :
+#   shdeathspectating.admin     Utiliser /shdeathspectating (par défaut : op).
+#
+# Les messages de la commande sont dans 'messages.yml'.
+#
+# ======================================================================== #
+
 spectatingDuration: 6 # Durée du mode spectateur en secondes
 expLossPercentage: 10 # En pourcentage, donc la le joueur perdra 10% de son exp
 deathSubtitle: '&8&l« &c&lVous êtes mort &8&l»' # Sous-titre affiché à la mort
@@ -10,3 +28,23 @@ worldWhitelist:
 - donjons
 - SuperiorWorld
 deathSound: ENTITY_ENDER_DRAGON_GROWL
+
+# Mode réseau. Actif seulement si SHNetwork est installé et 'actif' vaut true : l'état « mort, en attente de
+# réapparition » est alors écrit dans la base partagée (table shdeathspectating_morts : uuid, since) au lieu de
+# spectating.yml, et relu à l'arrivée du joueur sur un serveur. Sans SHNetwork, rien de ceci n'est utilisé.
+# Demande un redémarrage.
+reseau:
+  actif: true
+  # Durée maximale, en secondes, pendant laquelle on attend que l'autre serveur ait fini de sauvegarder
+  # le joueur avant de relire son état de mort
+  attente-max-secondes: 10
+  # Avec HuskSync, le gamemode du joueur est réappliqué à son arrivée : la réapparition attend la fin de cette
+  # synchronisation. Durée maximale de cette attente, en secondes, avant de réapparaître sans elle.
+  attente-synchro-secondes: 15
+  base-de-donnees:
+    url: "jdbc:mariadb://127.0.0.1:3306/bo_net"
+    utilisateur: shdeathspectating
+    mot-de-passe: CHANGE_ME
+    # Délai maximal de connexion et de réponse de la base, en millisecondes. Une base qui ne répond pas
+    # laisse le joueur avec l'état de mort local de ce serveur (spectating.yml).
+    delai-ms: 3000

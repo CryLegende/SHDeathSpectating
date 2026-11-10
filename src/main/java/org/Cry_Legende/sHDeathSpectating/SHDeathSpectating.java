@@ -1,5 +1,9 @@
 package org.Cry_Legende.sHDeathSpectating;
 
+import org.Cry_Legende.sHDeathSpectating.network.DeathDatabase;
+import org.Cry_Legende.sHDeathSpectating.network.NetworkDeaths;
+import org.Cry_Legende.sHDeathSpectating.network.NetworkLink;
+import org.Cry_Legende.sHDeathSpectating.network.ShNetworkLink;
 import org.bukkit.damage.DamageType;
 import org.bukkit.damage.DamageSource;
 import com.comphenix.protocol.PacketType;
@@ -13,6 +17,8 @@ import com.comphenix.protocol.wrappers.PlayerInfoData;
 import com.comphenix.protocol.wrappers.WrappedGameProfile;
 import net.kyori.adventure.text.Component;
 import org.bukkit.*;
+import org.bukkit.command.Command;
+import org.bukkit.command.CommandSender;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.ArmorStand;
@@ -38,8 +44,10 @@ import org.bukkit.scheduler.BukkitRunnable;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Level;
@@ -88,15 +96,20 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
     private final Object saveLock = new Object();
     private long saveVersion;
     private long savedVersion;
+    // Non nul seulement avec SHNetwork : l'état « mort » passe par la base partagée au lieu de spectating.yml
+    private NetworkDeaths network;
+    private YamlConfiguration messages;
 
     @Override
     public void onEnable() {
         serverThread = Thread.currentThread();
         this.saveDefaultConfig();
         loadConfiguration();
+        loadMessages();
         Bukkit.getPluginManager().registerEvents(this, this);
         createSpectatingFile();
         registerProtocolListeners();
+        enableNetwork();
     }
 
     @Override
@@ -107,9 +120,125 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
             stand.remove();
         }
         playerStands.clear();
-        if (spectatingConfig != null) {
+        if (network != null) {
+            network.stop();
+        } else if (spectatingConfig != null) {
             writeSpectating(spectatingConfig.saveToString(), ++saveVersion);
         }
+    }
+
+    /**
+     * Passe en mode réseau si SHNetwork est installé et 'reseau.actif' est vrai. Les classes qui touchent à SHNetwork
+     * ne sont chargées qu'ici : sans lui, le plugin se comporte exactement comme avant.
+     */
+    private void enableNetwork() {
+        if (!getConfig().getBoolean("reseau.actif", true)) return;
+        if (!Bukkit.getPluginManager().isPluginEnabled("SHNetwork")) return;
+        String url = getConfig().getString("reseau.base-de-donnees.url", "");
+        if (url == null || url.isBlank()) {
+            getLogger().warning("SHNetwork présent mais 'reseau.base-de-donnees' absente de config.yml : état de mort local à ce serveur.");
+            return;
+        }
+        DeathDatabase db = null;
+        try {
+            NetworkLink link = ShNetworkLink.open();
+            db = new DeathDatabase(url,
+                getConfig().getString("reseau.base-de-donnees.utilisateur"),
+                getConfig().getString("reseau.base-de-donnees.mot-de-passe"),
+                Math.max(250, getConfig().getInt("reseau.base-de-donnees.delai-ms", 3000)));
+            db.createTable();
+            Duration wait = Duration.ofSeconds(Math.max(1, getConfig().getInt("reseau.attente-max-secondes", 10)));
+            long syncWait = Math.max(1, getConfig().getInt("reseau.attente-synchro-secondes", 15)) * 20L;
+            NetworkDeaths net = new NetworkDeaths(this, db, link, wait, syncWait, this::onNetworkArrival);
+            net.start();
+            network = net;
+            getLogger().info("SHNetwork détecté : l'état de mort est partagé entre les serveurs (base partagée).");
+        } catch (Exception | LinkageError e) {
+            if (db != null) db.close();
+            getLogger().log(Level.SEVERE, "SHNetwork présent mais inutilisable, état de mort local à ce serveur : " + e);
+        }
+    }
+
+    /** messages.yml, avec les valeurs du jar pour toute clé absente du fichier du serveur. */
+    private void loadMessages() {
+        File file = new File(getDataFolder(), "messages.yml");
+        if (!file.exists()) saveResource("messages.yml", false);
+        messages = YamlConfiguration.loadConfiguration(file);
+        try (InputStreamReader defaults = new InputStreamReader(Objects.requireNonNull(getResource("messages.yml")), StandardCharsets.UTF_8)) {
+            messages.setDefaults(YamlConfiguration.loadConfiguration(defaults));
+        } catch (Exception e) {
+            getLogger().log(Level.WARNING, "messages.yml de référence illisible : " + e.getMessage());
+        }
+    }
+
+    private String message(String key) {
+        return ChatColor.translateAlternateColorCodes('&', messages.getString(key, key));
+    }
+
+    /** Mort enregistrée : en base avec SHNetwork, sinon dans spectating.yml. */
+    private void markDead(UUID playerId) {
+        if (network != null) {
+            network.markDead(playerId);
+            return;
+        }
+        spectatingConfig.set(playerId.toString(), true);
+        saveSpectatingConfig();
+    }
+
+    /** Réapparition enregistrée : en base avec SHNetwork, sinon dans spectating.yml. */
+    private void clearDead(UUID playerId) {
+        if (network != null) {
+            network.clear(playerId);
+            return;
+        }
+        spectatingConfig.set(playerId.toString(), null);
+        saveSpectatingConfig();
+    }
+
+    /**
+     * Joueur qui se connecte en mode réseau, une fois la base lue : réapparition s'il est parti mort d'un serveur.
+     * Base injoignable (dead nul) : on retombe sur spectating.yml comme avant le mode réseau.
+     */
+    private void onNetworkArrival(Player player, Boolean dead) {
+        boolean wasDead = dead != null ? dead : spectatingConfig.getBoolean(player.getUniqueId().toString());
+        if (wasDead) {
+            respawnPlayer(player);
+        }
+    }
+
+    @Override
+    public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
+        if (!sender.hasPermission("shdeathspectating.admin")) {
+            sender.sendMessage(message("pas-de-permission"));
+            return true;
+        }
+        if (args.length != 1 || !args[0].equalsIgnoreCase("import")) {
+            sender.sendMessage(message("usage"));
+            return true;
+        }
+        if (network == null) {
+            sender.sendMessage(message("import-inactif"));
+            return true;
+        }
+        // spectating.yml est lu ici, sur le fil principal ; l'écriture en base se fait ailleurs
+        List<UUID> dead = new ArrayList<>();
+        for (String key : spectatingConfig.getKeys(false)) {
+            if (!spectatingConfig.getBoolean(key)) continue;
+            try {
+                dead.add(UUID.fromString(key));
+            } catch (IllegalArgumentException ignored) {
+                // clé qui n'est pas un joueur
+            }
+        }
+        network.importDead(dead).thenAccept(created -> Bukkit.getScheduler().runTask(this, () -> {
+            if (created < 0) {
+                sender.sendMessage(message("import-erreur"));
+            } else {
+                sender.sendMessage(message("import-termine")
+                    .replace("{lus}", String.valueOf(dead.size())).replace("{crees}", String.valueOf(created)));
+            }
+        }));
+        return true;
     }
 
     private void registerProtocolListeners() {
@@ -335,8 +464,7 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
             deathEvent.setDroppedExp(0);
         }
 
-        spectatingConfig.set(player.getUniqueId().toString(), true);
-        saveSpectatingConfig();
+        markDead(player.getUniqueId());
     }
 
     // --- NOUVELLE LOGIQUE D'IMMOBILISATION ET DE SPECTATING ---
@@ -530,8 +658,7 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
         lastPlayerYaw.remove(player.getUniqueId());
         lastPlayerPitch.remove(player.getUniqueId());
 
-        spectatingConfig.set(player.getUniqueId().toString(), null);
-        saveSpectatingConfig();
+        clearDead(player.getUniqueId());
     }
 
     // Les méthodes utilitaires restent inchangées
@@ -612,6 +739,7 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
     @EventHandler
     public void onPlayerQuit(PlayerQuitEvent event) {
         UUID playerId = event.getPlayer().getUniqueId();
+        if (network != null) network.left(playerId);
         // Dernier attaquant retenu à chaque coup reçu : sans ce retrait, l'entité restait référencée après le départ
         playerAttackers.remove(playerId);
         if (playerLocations.containsKey(playerId)) {
@@ -629,6 +757,11 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
     @EventHandler
     public void onPlayerJoin(PlayerJoinEvent event) {
         Player player = event.getPlayer();
+        if (network != null) {
+            // l'état de mort vient de la base, relue une fois l'autre serveur déchargé du joueur
+            network.arrive(player);
+            return;
+        }
         if (spectatingConfig.getBoolean(player.getUniqueId().toString())) {
             respawnPlayer(player);
         }

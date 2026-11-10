@@ -1,0 +1,10 @@
+# Messages de SHDeathSpectating de la commande d'administration. Couleurs avec &.
+# Les textes de la mort elle-même (sous-titre, message, commande bloquée) sont dans config.yml.
+
+usage: "&7&l« &c&lSH &8&l» &cUsage&7 : &c/shdeathspectating import"
+pas-de-permission: "&7&l« &c&lSH &8&l» &cTu n'as pas la permission&7 d'utiliser cette commande."
+
+# Mode réseau (SHNetwork) : copie des morts de spectating.yml dans la base partagée.
+import-inactif: "&7&l« &c&lSH &8&l» &cLe mode réseau n'est pas actif&7 : rien à importer."
+import-termine: "&7&l« &a&lSH &8&l» &7Import terminé : &a{crees}&7 mort(s) ajoutée(s) sur &a{lus}&7 lue(s) dans spectating.yml."
+import-erreur: "&7&l« &c&lSH &8&l» &cImport impossible&7, la base ne répond pas. Voir la console."

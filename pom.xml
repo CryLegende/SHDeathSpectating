@@ -100,5 +100,25 @@
             <version>2.9.3</version>
             <scope>provided</scope>
         </dependency>
+        <!-- Facultatif à l'exécution (softdepend) : sans lui, l'état de mort reste local à chaque serveur -->
+        <dependency>
+            <groupId>org.Cry_Legende</groupId>
+            <artifactId>SHNetwork</artifactId>
+            <version>1.0</version>
+            <scope>provided</scope>
+        </dependency>
+        <!-- Chargés par Paper (libraries: de plugin.yml) : le serveur n'embarque que les pilotes MySQL et SQLite -->
+        <dependency>
+            <groupId>com.zaxxer</groupId>
+            <artifactId>HikariCP</artifactId>
+            <version>5.1.0</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.mariadb.jdbc</groupId>
+            <artifactId>mariadb-java-client</artifactId>
+            <version>3.4.1</version>
+            <scope>provided</scope>
+        </dependency>
     </dependencies>
 </project>
