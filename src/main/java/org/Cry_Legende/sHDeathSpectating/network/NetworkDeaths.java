@@ -124,6 +124,24 @@ public final class NetworkDeaths implements Listener {
         return result;
     }
 
+    /** Lit l'état de mort en base, hors du fil principal ; rend nul si la base ne répond pas. */
+    public CompletableFuture<Boolean> isDead(UUID uuid) {
+        CompletableFuture<Boolean> result = new CompletableFuture<>();
+        try {
+            io.execute(() -> {
+                try {
+                    result.complete(db.isDead(uuid));
+                } catch (SQLException e) {
+                    plugin.getLogger().log(Level.WARNING, "Etat de mort de " + uuid + " non lu en base : " + e.getMessage());
+                    result.complete(null);
+                }
+            });
+        } catch (RejectedExecutionException stopped) {
+            result.complete(null);
+        }
+        return result;
+    }
+
     /** Un joueur se connecte : la base dit s'il est parti mort d'un serveur, et il réapparaît si oui. */
     public void arrive(Player player) {
         UUID uuid = player.getUniqueId();

@@ -15,10 +15,22 @@ libraries:
 commands:
   shdeathspectating:
     description: Administration de SHDeathSpectating
-    usage: /shdeathspectating import
-    permission: shdeathspectating.admin
+    usage: /<command> <import|reload|respawn>
 
 permissions:
   shdeathspectating.admin:
-    description: Utiliser /shdeathspectating
+    description: Toutes les sous-commandes de /shdeathspectating
+    default: op
+    children:
+      shdeathspectating.admin.import: true
+      shdeathspectating.admin.reload: true
+      shdeathspectating.admin.respawn: true
+  shdeathspectating.admin.import:
+    description: Copier les morts de spectating.yml dans la base partagée (/shdeathspectating import)
+    default: op
+  shdeathspectating.admin.reload:
+    description: Recharger la configuration (/shdeathspectating reload)
+    default: op
+  shdeathspectating.admin.respawn:
+    description: Faire réapparaître un joueur resté en état de mort (/shdeathspectating respawn)
     default: op

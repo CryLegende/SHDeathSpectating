@@ -19,6 +19,7 @@ import net.kyori.adventure.text.Component;
 import org.bukkit.*;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
+import org.bukkit.configuration.InvalidConfigurationException;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.ArmorStand;
@@ -66,15 +67,16 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
     }
 
 
-    private int spectatingDuration;
-    private int expLossPercentage;
-    private boolean hideSpectatorMenu;
-    private String deathSubtitle;
-    private String spawnCommand;
-    private String deathMessage;
-    private String commandBlockedMessage;
-    private Sound deathSound;
-    private Set<String> worldWhitelist;
+    // Relus par /shdeathspectating reload, lus depuis le fil principal, celui des mondes et celui de ProtocolLib
+    private volatile int spectatingDuration;
+    private volatile int expLossPercentage;
+    private volatile boolean hideSpectatorMenu;
+    private volatile String deathSubtitle;
+    private volatile String spawnCommand;
+    private volatile String deathMessage;
+    private volatile String commandBlockedMessage;
+    private volatile Sound deathSound;
+    private volatile Set<String> worldWhitelist;
     // Lues et écrites aussi depuis le thread d'un monde (dégâts reçus pendant son tick), d'où les collections concurrentes.
     private final Map<UUID, Location> playerLocations = new ConcurrentHashMap<>();
     private final Map<UUID, Entity> playerAttackers = new ConcurrentHashMap<>();
@@ -98,7 +100,7 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
     private long savedVersion;
     // Non nul seulement avec SHNetwork : l'état « mort » passe par la base partagée au lieu de spectating.yml
     private NetworkDeaths network;
-    private YamlConfiguration messages;
+    private volatile YamlConfiguration messages;
 
     @Override
     public void onEnable() {
@@ -159,20 +161,56 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
         }
     }
 
-    /** messages.yml, avec les valeurs du jar pour toute clé absente du fichier du serveur. */
+    /** Au démarrage : messages.yml, avec les valeurs du jar pour toute clé absente du fichier du serveur. */
     private void loadMessages() {
-        File file = new File(getDataFolder(), "messages.yml");
-        if (!file.exists()) saveResource("messages.yml", false);
-        messages = YamlConfiguration.loadConfiguration(file);
-        try (InputStreamReader defaults = new InputStreamReader(Objects.requireNonNull(getResource("messages.yml")), StandardCharsets.UTF_8)) {
-            messages.setDefaults(YamlConfiguration.loadConfiguration(defaults));
-        } catch (Exception e) {
-            getLogger().log(Level.WARNING, "messages.yml de référence illisible : " + e.getMessage());
+        try {
+            messages = readMessages();
+        } catch (IOException | InvalidConfigurationException e) {
+            getLogger().log(Level.SEVERE, "messages.yml illisible, textes du jar utilisés : " + describe(e));
+            YamlConfiguration fallback = new YamlConfiguration();
+            YamlConfiguration defaults = jarMessages();
+            if (defaults != null) {
+                fallback.setDefaults(defaults);
+            }
+            messages = fallback;
         }
     }
 
-    private String message(String key) {
-        return ChatColor.translateAlternateColorCodes('&', messages.getString(key, key));
+    /** Lit messages.yml en mode strict : une erreur de syntaxe est levée au lieu d'être avalée. */
+    private YamlConfiguration readMessages() throws IOException, InvalidConfigurationException {
+        File file = new File(getDataFolder(), "messages.yml");
+        if (!file.exists()) saveResource("messages.yml", false);
+        YamlConfiguration loaded = new YamlConfiguration();
+        loaded.load(file);
+        YamlConfiguration defaults = jarMessages();
+        if (defaults != null) {
+            loaded.setDefaults(defaults);
+        }
+        return loaded;
+    }
+
+    private YamlConfiguration jarMessages() {
+        try (InputStreamReader defaults = new InputStreamReader(Objects.requireNonNull(getResource("messages.yml")), StandardCharsets.UTF_8)) {
+            return YamlConfiguration.loadConfiguration(defaults);
+        } catch (Exception e) {
+            getLogger().log(Level.WARNING, "messages.yml de référence illisible : " + e.getMessage());
+            return null;
+        }
+    }
+
+    /** Cause d'une erreur de lecture sur une seule ligne. */
+    private static String describe(Exception e) {
+        String text = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+        text = text.replaceAll("\\s*\\R\\s*", " ").trim();
+        return text.length() > 240 ? text.substring(0, 240) + "..." : text;
+    }
+
+    private String message(String key, String... pairs) {
+        String text = ChatColor.translateAlternateColorCodes('&', messages.getString(key, key));
+        for (int i = 0; i + 1 < pairs.length; i += 2) {
+            text = text.replace(pairs[i], pairs[i + 1] == null ? "" : pairs[i + 1]);
+        }
+        return text;
     }
 
     /** Mort enregistrée : en base avec SHNetwork, sinon dans spectating.yml. */
@@ -206,19 +244,60 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
         }
     }
 
+    private static final String PERMISSION_IMPORT = "shdeathspectating.admin.import";
+    private static final String PERMISSION_RELOAD = "shdeathspectating.admin.reload";
+    private static final String PERMISSION_RESPAWN = "shdeathspectating.admin.respawn";
+
+    /** Sous-commandes que l'expéditeur a le droit d'utiliser. */
+    private List<String> allowedSubcommands(CommandSender sender) {
+        List<String> subs = new ArrayList<>();
+        if (sender.hasPermission(PERMISSION_IMPORT)) subs.add("import");
+        if (sender.hasPermission(PERMISSION_RELOAD)) subs.add("reload");
+        if (sender.hasPermission(PERMISSION_RESPAWN)) subs.add("respawn");
+        return subs;
+    }
+
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
-        if (!sender.hasPermission("shdeathspectating.admin")) {
+        List<String> subs = allowedSubcommands(sender);
+        if (subs.isEmpty()) {
             sender.sendMessage(message("pas-de-permission"));
             return true;
         }
-        if (args.length != 1 || !args[0].equalsIgnoreCase("import")) {
-            sender.sendMessage(message("usage"));
-            return true;
+        String sub = args.length > 0 ? args[0].toLowerCase(Locale.ROOT) : "";
+        if (sub.equals("import") && args.length == 1 && subs.contains("import")) {
+            importDeaths(sender);
+        } else if (sub.equals("reload") && args.length == 1 && subs.contains("reload")) {
+            reloadCommand(sender);
+        } else if (sub.equals("respawn") && args.length == 2 && subs.contains("respawn")) {
+            respawnCommand(sender, args[1]);
+        } else {
+            sender.sendMessage(message("usage-liste", "{sous-commandes}", String.join("|", subs)));
         }
+        return true;
+    }
+
+    @Override
+    public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
+        List<String> result = new ArrayList<>();
+        if (args.length == 1) {
+            String start = args[0].toLowerCase(Locale.ROOT);
+            for (String sub : allowedSubcommands(sender)) {
+                if (sub.startsWith(start)) result.add(sub);
+            }
+        } else if (args.length == 2 && args[0].equalsIgnoreCase("respawn") && sender.hasPermission(PERMISSION_RESPAWN)) {
+            String start = args[1].toLowerCase(Locale.ROOT);
+            for (Player online : Bukkit.getOnlinePlayers()) {
+                if (online.getName().toLowerCase(Locale.ROOT).startsWith(start)) result.add(online.getName());
+            }
+        }
+        return result;
+    }
+
+    private void importDeaths(CommandSender sender) {
         if (network == null) {
             sender.sendMessage(message("import-inactif"));
-            return true;
+            return;
         }
         // spectating.yml est lu ici, sur le fil principal ; l'écriture en base se fait ailleurs
         List<UUID> dead = new ArrayList<>();
@@ -238,7 +317,74 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
                     .replace("{lus}", String.valueOf(dead.size())).replace("{crees}", String.valueOf(created)));
             }
         }));
-        return true;
+    }
+
+    /**
+     * Relit config.yml et messages.yml. Un fichier invalide laisse l'ancienne configuration en place. spectating.yml
+     * (données) et la section 'reseau' (connexion à la base) ne sont pas relus.
+     */
+    private void reloadCommand(CommandSender sender) {
+        File configFile = new File(getDataFolder(), "config.yml");
+        if (!configFile.exists()) saveDefaultConfig();
+        YamlConfiguration newConfig = new YamlConfiguration();
+        try {
+            newConfig.load(configFile);
+        } catch (IOException | InvalidConfigurationException e) {
+            sender.sendMessage(message("reload-erreur", "{fichier}", "config.yml", "{erreur}", describe(e)));
+            return;
+        }
+        YamlConfiguration newMessages;
+        try {
+            newMessages = readMessages();
+        } catch (IOException | InvalidConfigurationException e) {
+            sender.sendMessage(message("reload-erreur", "{fichier}", "messages.yml", "{erreur}", describe(e)));
+            return;
+        }
+        String networkBefore = String.valueOf(getConfig().get("reseau"));
+        reloadConfig();
+        loadConfiguration();
+        messages = newMessages;
+        sender.sendMessage(message("reload-ok"));
+        if (!networkBefore.equals(String.valueOf(getConfig().get("reseau")))) {
+            sender.sendMessage(message("reload-reseau"));
+        }
+    }
+
+    /**
+     * Force la réapparition d'un joueur resté en état de mort (spectateur sans caméra, mort d'un autre serveur, synchronisation
+     * perdue). Refusé pour un joueur qui n'est pas mort.
+     */
+    private void respawnCommand(CommandSender sender, String name) {
+        Player target = Bukkit.getPlayerExact(name);
+        if (target == null) {
+            sender.sendMessage(message("joueur-introuvable", "{joueur}", name));
+            return;
+        }
+        UUID id = target.getUniqueId();
+        boolean dead = spectatingPlayers.contains(id) || playerStands.containsKey(id) || playerLocations.containsKey(id)
+            || respawnTasks.containsKey(id) || (network == null && spectatingConfig.getBoolean(id.toString()));
+        if (dead) {
+            forceRespawn(sender, target);
+        } else if (network != null) {
+            // l'état de mort est en base : lu hors du fil principal
+            network.isDead(id).thenAccept(inBase -> Bukkit.getScheduler().runTask(this, () -> {
+                if (Boolean.TRUE.equals(inBase)) {
+                    forceRespawn(sender, target);
+                } else {
+                    sender.sendMessage(message("respawn-pas-mort", "{joueur}", target.getName()));
+                }
+            }));
+        } else {
+            sender.sendMessage(message("respawn-pas-mort", "{joueur}", target.getName()));
+        }
+    }
+
+    private void forceRespawn(CommandSender sender, Player target) {
+        if (!target.isOnline()) return;
+        BukkitRunnable pending = respawnTasks.remove(target.getUniqueId());
+        if (pending != null) pending.cancel();
+        respawnPlayer(target);
+        sender.sendMessage(message("respawn-ok", "{joueur}", target.getName()));
     }
 
     private void registerProtocolListeners() {

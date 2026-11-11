@@ -1,8 +1,17 @@
 # Messages de SHDeathSpectating de la commande d'administration. Couleurs avec &.
 # Les textes de la mort elle-même (sous-titre, message, commande bloquée) sont dans config.yml.
+# Variables : {sous-commandes} (usage-liste), {fichier} et {erreur} (reload-erreur), {joueur}, {lus} et {crees} (import-termine).
 
-usage: "&7&l« &c&lSH &8&l» &cUsage&7 : &c/shdeathspectating import"
+usage-liste: "&7&l« &c&lSH &8&l» &cUsage&7 : &c/shdeathspectating &7<{sous-commandes}>"
 pas-de-permission: "&7&l« &c&lSH &8&l» &cTu n'as pas la permission&7 d'utiliser cette commande."
+
+reload-ok: "&7&l« &a&lSH &8&l» &7Configuration &arechargée&7."
+reload-erreur: "&7&l« &c&lSH &8&l» &cRechargement refusé&7 : &c{fichier}&7 est invalide, l'ancienne configuration reste en place. &c{erreur}"
+reload-reseau: "&7&l« &e&lSH &8&l» &7La section &ereseau&7 a changé : elle ne sera prise en compte qu'au &eprochain redémarrage&7."
+
+respawn-ok: "&7&l« &a&lSH &8&l» &a{joueur}&7 est réapparu."
+respawn-pas-mort: "&7&l« &c&lSH &8&l» &c{joueur}&7 n'est pas en état de mort : rien à faire."
+joueur-introuvable: "&7&l« &c&lSH &8&l» &cJoueur introuvable&7 : &c{joueur}&7 n'est pas connecté."
 
 # Mode réseau (SHNetwork) : copie des morts de spectating.yml dans la base partagée.
 import-inactif: "&7&l« &c&lSH &8&l» &cLe mode réseau n'est pas actif&7 : rien à importer."

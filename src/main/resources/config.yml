@@ -6,11 +6,19 @@
 # L'exp perdue est lâchée au sol. Avec SHNetwork, l'état « mort » est partagé entre les serveurs : un joueur
 # qui change de serveur pendant ces secondes réapparaît à son arrivée (voir la section 'reseau' en bas du fichier).
 #
-# Commandes :
-#   /shdeathspectating import   Copie les morts de spectating.yml dans la base partagée (mode réseau, une seule fois).
+# Commandes (la console peut les utiliser) :
+#   /shdeathspectating import          Copie les morts de spectating.yml dans la base partagée (mode réseau, une seule fois).
+#   /shdeathspectating reload          Relit config.yml et messages.yml. Appliqué aux morts suivantes ; une mort en cours
+#                                      garde sa durée. En cas d'erreur YAML, l'ancienne configuration reste en place et
+#                                      le fichier fautif est indiqué. La section 'reseau' demande un redémarrage.
+#   /shdeathspectating respawn <joueur>  Fait réapparaître un joueur resté en état de mort (spectateur sans caméra, mort
+#                                      sur un autre serveur). Refusé s'il n'est pas mort.
 #
 # Permissions :
-#   shdeathspectating.admin     Utiliser /shdeathspectating (par défaut : op).
+#   shdeathspectating.admin           Toutes les sous-commandes (par défaut : op).
+#   shdeathspectating.admin.import    /shdeathspectating import (par défaut : op).
+#   shdeathspectating.admin.reload    /shdeathspectating reload (par défaut : op).
+#   shdeathspectating.admin.respawn   /shdeathspectating respawn (par défaut : op).
 #
 # Les messages de la commande sont dans 'messages.yml'.
 #
@@ -28,6 +36,8 @@ worldWhitelist:
 - donjons
 - SuperiorWorld
 deathSound: ENTITY_ENDER_DRAGON_GROWL
+# Masque côté client le menu de choix de joueur du mode spectateur (true par défaut). À false, le joueur mort voit ce menu.
+hideSpectatorMenu: true
 
 # Mode réseau. Actif seulement si SHNetwork est installé et 'actif' vaut true : l'état « mort, en attente de
 # réapparition » est alors écrit dans la base partagée (table shdeathspectating_morts : uuid, since) au lieu de

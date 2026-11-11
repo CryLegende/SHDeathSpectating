@@ -38,9 +38,22 @@ Sans SHNetwork, ou sans les clés `reseau` dans la configuration, le plugin se c
 
 ## Commandes
 
-| Commande | Permission | Effet |
+| Commande | Alias | Description | Permission |
+|---|---|---|---|
+| `/shdeathspectating import` | — | Copie les morts de `spectating.yml` dans la base partagée (mode réseau). | `shdeathspectating.admin.import` |
+| `/shdeathspectating reload` | — | Relit `config.yml` et `messages.yml`, appliqué aux morts suivantes. En cas d'erreur YAML, l'ancienne configuration reste en place et le fichier fautif est indiqué. La section `reseau` demande un redémarrage. | `shdeathspectating.admin.reload` |
+| `/shdeathspectating respawn <joueur>` | — | Fait réapparaître un joueur resté en état de mort ; refusé s'il n'est pas mort. | `shdeathspectating.admin.respawn` |
+
+La console peut utiliser les trois.
+
+## Permissions
+
+| Permission | Description | Par défaut |
 |---|---|---|
-| `/shdeathspectating import` | `shdeathspectating.admin` | Copie les morts de `spectating.yml` dans la base partagée (mode réseau) |
+| `shdeathspectating.admin` | Toutes les sous-commandes de `/shdeathspectating`. | `op` |
+| `shdeathspectating.admin.import` | `/shdeathspectating import`. | `op` |
+| `shdeathspectating.admin.reload` | `/shdeathspectating reload`. | `op` |
+| `shdeathspectating.admin.respawn` | `/shdeathspectating respawn`. | `op` |
 
 ## Configuration
 
