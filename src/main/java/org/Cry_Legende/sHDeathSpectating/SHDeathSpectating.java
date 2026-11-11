@@ -19,6 +19,7 @@ import net.kyori.adventure.text.Component;
 import org.bukkit.*;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
+import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.InvalidConfigurationException;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.configuration.file.YamlConfiguration;
@@ -101,11 +102,13 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
     // Non nul seulement avec SHNetwork : l'état « mort » passe par la base partagée au lieu de spectating.yml
     private NetworkDeaths network;
     private volatile YamlConfiguration messages;
+    private String networkSettingsAtStart = "";
 
     @Override
     public void onEnable() {
         serverThread = Thread.currentThread();
         this.saveDefaultConfig();
+        networkSettingsAtStart = networkSettings();
         loadConfiguration();
         loadMessages();
         Bukkit.getPluginManager().registerEvents(this, this);
@@ -319,6 +322,12 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
         }));
     }
 
+    /** Contenu de la section 'reseau' du config.yml, pour savoir si elle a changé depuis le démarrage. */
+    private String networkSettings() {
+        ConfigurationSection section = getConfig().getConfigurationSection("reseau");
+        return section == null ? "" : section.getValues(true).toString();
+    }
+
     /**
      * Relit config.yml et messages.yml. Un fichier invalide laisse l'ancienne configuration en place. spectating.yml
      * (données) et la section 'reseau' (connexion à la base) ne sont pas relus.
@@ -340,12 +349,11 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
             sender.sendMessage(message("reload-erreur", "{fichier}", "messages.yml", "{erreur}", describe(e)));
             return;
         }
-        String networkBefore = String.valueOf(getConfig().get("reseau"));
         reloadConfig();
         loadConfiguration();
         messages = newMessages;
         sender.sendMessage(message("reload-ok"));
-        if (!networkBefore.equals(String.valueOf(getConfig().get("reseau")))) {
+        if (!networkSettings().equals(networkSettingsAtStart)) {
             sender.sendMessage(message("reload-reseau"));
         }
     }
