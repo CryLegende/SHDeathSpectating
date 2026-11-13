@@ -32,9 +32,8 @@ deathMessage: '&7&l« &c&lSH &8&l» &cVous êtes morts&7, réapparition dans &c{
   secondes' # Message de mort
 commandBlockedMessage: '&cVous ne pouvez pas exécuter de commandes en étant mort.'
 worldWhitelist:
-- arene
-- donjons
-- SuperiorWorld
+- world
+- world_nether
 deathSound: ENTITY_ENDER_DRAGON_GROWL
 # Masque côté client le menu de choix de joueur du mode spectateur (true par défaut). À false, le joueur mort voit ce menu.
 hideSpectatorMenu: true
@@ -52,7 +51,7 @@ reseau:
   # synchronisation. Durée maximale de cette attente, en secondes, avant de réapparaître sans elle.
   attente-synchro-secondes: 15
   base-de-donnees:
-    url: "jdbc:mariadb://127.0.0.1:3306/bo_net"
+    url: "jdbc:mariadb://127.0.0.1:3306/minecraft"
     utilisateur: shdeathspectating
     mot-de-passe: CHANGE_ME
     # Délai maximal de connexion et de réponse de la base, en millisecondes. Une base qui ne répond pas
