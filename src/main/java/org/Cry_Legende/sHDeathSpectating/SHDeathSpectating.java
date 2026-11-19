@@ -4,8 +4,14 @@ import org.Cry_Legende.sHDeathSpectating.network.DeathDatabase;
 import org.Cry_Legende.sHDeathSpectating.network.NetworkDeaths;
 import org.Cry_Legende.sHDeathSpectating.network.NetworkLink;
 import org.Cry_Legende.sHDeathSpectating.network.ShNetworkLink;
-import org.bukkit.damage.DamageType;
+import io.papermc.paper.datacomponent.DataComponentTypes;
+import io.papermc.paper.datacomponent.item.DeathProtection;
+import io.papermc.paper.datacomponent.item.consumable.ConsumeEffect;
 import org.bukkit.damage.DamageSource;
+import org.bukkit.event.entity.EntityResurrectEvent;
+import org.bukkit.inventory.EquipmentSlot;
+import org.bukkit.potion.PotionEffectType;
+import org.bukkit.tag.DamageTypeTags;
 import com.comphenix.protocol.PacketType;
 import com.comphenix.protocol.ProtocolLibrary;
 import com.comphenix.protocol.events.ListenerPriority;
@@ -54,6 +60,7 @@ import java.nio.file.Files;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.logging.Level;
 
 public class SHDeathSpectating extends JavaPlugin implements Listener {
@@ -524,29 +531,95 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
 
         if (player.getHealth() - event.getFinalDamage() <= 0) {
             event.setCancelled(true);
+            final DamageSource source = event.getDamageSource();
             if (onServerThread()) {
-                processDeath(player, event.getCause());
+                resolveLethalDamage(player, source);
                 return;
             }
             // Dégâts reçus pendant le tick d'un monde : la mort (gamemode, caméra, inventaire, événement de mort) passe par le thread principal
             UUID playerId = player.getUniqueId();
             if (!pendingDeaths.add(playerId)) return;
-            final EntityDamageEvent.DamageCause cause = event.getCause();
             Bukkit.getScheduler().runTask(this, () -> {
                 pendingDeaths.remove(playerId);
                 if (player.isOnline()) {
-                    processDeath(player, cause);
+                    resolveLethalDamage(player, source);
                 }
             });
         }
     }
 
-    private void processDeath(Player player, EntityDamageEvent.DamageCause cause) {
-        handlePlayerDeath(player, cause);
+    /** Coup mortel annulé en amont : la protection de mort (totem) passe avant la mort, comme en vanilla. Fil principal. */
+    private void resolveLethalDamage(Player player, DamageSource source) {
+        if (tryDeathProtection(player, source)) return;
+        handlePlayerDeath(player, source);
         scheduleRespawnAndFollowTasks(player);
     }
 
-    private void handlePlayerDeath(Player player, EntityDamageEvent.DamageCause cause) {
+    /**
+     * Protection de mort vanilla, refaite ici puisque le coup mortel est annulé avant que le jeu ne la teste : objet porteur
+     * du composant death_protection en main puis en main secondaire (le Totem d'immortalité, mais aussi tout objet qui
+     * le reçoit), sauf pour les dégâts qui traversent l'invulnérabilité (vide, /kill). EntityResurrectEvent est appelé
+     * dans tous les cas, annulé d'office sans objet, pour qu'un autre plugin puisse sauver le joueur.
+     */
+    private boolean tryDeathProtection(Player player, DamageSource source) {
+        if (DamageTypeTags.BYPASSES_INVULNERABILITY.isTagged(source.getDamageType())) return false;
+
+        PlayerInventory inventory = player.getInventory();
+        EquipmentSlot slot = null;
+        ItemStack held = null;
+        DeathProtection protection = null;
+        for (EquipmentSlot hand : new EquipmentSlot[]{EquipmentSlot.HAND, EquipmentSlot.OFF_HAND}) {
+            ItemStack item = inventory.getItem(hand);
+            if (item.getType().isAir()) continue;
+            DeathProtection found = item.getData(DataComponentTypes.DEATH_PROTECTION);
+            if (found != null) {
+                slot = hand;
+                held = item.clone();
+                protection = found;
+                break;
+            }
+        }
+
+        EntityResurrectEvent resurrect = slot == null ? new EntityResurrectEvent(player) : new EntityResurrectEvent(player, slot);
+        resurrect.setCancelled(protection == null);
+        Bukkit.getPluginManager().callEvent(resurrect);
+        if (resurrect.isCancelled()) return false;
+
+        if (held != null) {
+            held.setAmount(held.getAmount() - 1);
+            inventory.setItem(slot, held.getAmount() > 0 ? held : null);
+            player.incrementStatistic(Statistic.USE_ITEM, held.getType());
+        }
+        player.setHealth(1.0);
+        if (protection != null) {
+            for (ConsumeEffect effect : protection.deathEffects()) {
+                applyDeathEffect(player, effect);
+            }
+        }
+        player.playEffect(EntityEffect.PROTECTED_FROM_DEATH);
+        return true;
+    }
+
+    /** Effets du composant death_protection ; le téléport aléatoire (fruit de chorus) n'existe pas sur le totem vanilla. */
+    private static void applyDeathEffect(Player player, ConsumeEffect effect) {
+        if (effect instanceof ConsumeEffect.ClearAllStatusEffects) {
+            for (PotionEffect active : player.getActivePotionEffects()) {
+                player.removePotionEffect(active.getType());
+            }
+        } else if (effect instanceof ConsumeEffect.ApplyStatusEffects apply) {
+            if (ThreadLocalRandom.current().nextFloat() < apply.probability()) {
+                player.addPotionEffects(apply.effects());
+            }
+        } else if (effect instanceof ConsumeEffect.RemoveStatusEffects remove) {
+            for (PotionEffectType type : remove.removeEffects().resolve(Registry.EFFECT)) {
+                player.removePotionEffect(type);
+            }
+        } else if (effect instanceof ConsumeEffect.PlaySound sound) {
+            player.getWorld().playSound(player.getLocation(), sound.sound().asString(), SoundCategory.PLAYERS, 1.0f, 1.0f);
+        }
+    }
+
+    private void handlePlayerDeath(Player player, DamageSource source) {
         // Marqué avant le changement de gamemode : le paquet de tab-list émis juste en
         // dessous doit déjà être masqué pour ce joueur.
         spectatingPlayers.add(player.getUniqueId());
@@ -589,7 +662,7 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
 
         int totalExp = getTotalExperience(player);
         int expToDropBasedOnConfig = (int) (totalExp * (expLossPercentage / 100.0));
-        PlayerDeathEvent deathEvent = createDeathEvent(player, playerInventoryItems);
+        PlayerDeathEvent deathEvent = createDeathEvent(player, playerInventoryItems, source);
         if (!player.getWorld().getGameRuleValue(GameRules.KEEP_INVENTORY)) {
             deathEvent.setDroppedExp(expToDropBasedOnConfig);
         }
@@ -865,8 +938,8 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
     }
 
     // Événement de mort « de notification » : message vide, le constructeur à message Component remplace celui à String.
-    private static PlayerDeathEvent createDeathEvent(Player player, List<ItemStack> drops) {
-        DamageSource source = DamageSource.builder(DamageType.GENERIC).build();
+    // La source est celle du coup mortel : les autres plugins y lisent la cause et le responsable de la mort.
+    private static PlayerDeathEvent createDeathEvent(Player player, List<ItemStack> drops, DamageSource source) {
         return new PlayerDeathEvent(player, source, drops, 0, Component.empty(), true);
     }
 
