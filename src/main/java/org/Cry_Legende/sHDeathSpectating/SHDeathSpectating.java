@@ -27,6 +27,7 @@ import org.bukkit.entity.Entity;
 import org.bukkit.entity.ExperienceOrb;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
+import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
@@ -86,6 +87,8 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
     private final Map<UUID, BukkitRunnable> cameraLockTasks = new ConcurrentHashMap<>();
     private final Map<UUID, ArmorStand> playerStands = new ConcurrentHashMap<>();
     private volatile boolean spectatorMaskFailed = false;
+    // packetevents est en softdepend : chargé avant nous s'il est là, la réponse ne change plus
+    private boolean packetEventsPresent;
     // Vrai le temps d'une téléportation voulue par le plugin lui-même : seules celles-là passent pour un joueur mort
     private volatile boolean selfTeleport = false;
     private final Map<UUID, Float> lastPlayerYaw = new ConcurrentHashMap<>();
@@ -112,6 +115,7 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
         loadMessages();
         Bukkit.getPluginManager().registerEvents(this, this);
         createSpectatingFile();
+        packetEventsPresent = Bukkit.getPluginManager().isPluginEnabled("packetevents");
         enableNetwork();
     }
 
@@ -400,7 +404,7 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
     // Le gamemode serveur, la caméra et la visibilité pour les autres joueurs ne changent pas.
     private void sendMaskedGameMode(Player player) {
         if (!hideSpectatorMenu || spectatorMaskFailed) return;
-        if (!Bukkit.getPluginManager().isPluginEnabled("packetevents")) {
+        if (!packetEventsPresent) {
             spectatorMaskFailed = true;
             getLogger().warning("Masquage du menu spectateur indisponible : packetevents n'est pas installé.");
             return;
@@ -482,12 +486,10 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
         }
     }
 
-    @EventHandler
+    // HIGHEST : les dégâts sont jugés mortels une fois que les autres plugins ont fini de les modifier
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     public void onEntityDamage(EntityDamageEvent event) {
-        if (event.isCancelled()) return;
-        if (!(event.getEntity() instanceof Player)) return;
-
-        final Player player = (Player) event.getEntity();
+        if (!(event.getEntity() instanceof Player player)) return;
         if (!worldWhitelist.contains(player.getWorld().getName())) return;
 
         if (player.getHealth() - event.getFinalDamage() <= 0) {
@@ -845,6 +847,8 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
             // Votre logique d'interpolation reste inchangée, elle est excellente pour le lissage
             float newYaw = interpolateAngle(lastYaw, targetYaw, 0.1f); // Vous pouvez ajuster le facteur
             float newPitch = interpolateAngle(lastPitch, targetPitch, 0.1f);
+            // Rotation arrivée (moins de 0,05°) : rien à renvoyer au client, on évite une téléportation par tick
+            if (Math.abs(newYaw - lastYaw) < 0.05f && Math.abs(newPitch - lastPitch) < 0.05f) return;
 
             // On sauvegarde la nouvelle rotation
             lastPlayerYaw.put(playerId, newYaw);
