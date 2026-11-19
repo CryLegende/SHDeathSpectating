@@ -25,14 +25,14 @@ Utilisé sur : **Opale**.
 
 ## Fonctionnement
 
-La mort est la vraie : le jeu applique lui-même le Totem d'immortalité, la Malédiction de disparition, `keepInventory`, les drops, les statistiques et le responsable de la mort, et les autres plugins reçoivent un vrai `PlayerDeathEvent`. Le plugin ajoute, dans les mondes de `worldWhitelist` :
+Le coup mortel est annulé : le joueur ne meurt pas vraiment, donc l'écran de mort et le rechargement du monde n'existent pas. Le plugin refait ce que le jeu fait à la mort, dans les mondes de `worldWhitelist` :
 
-- pas de message de mort dans le tchat ;
-- une perte d'exp de `expLossPercentage` % (le reste est gardé), lâchée au sol ;
-- une réapparition immédiate sur place, puis `spectatingDuration` secondes en spectateur, caméra fixée au point de la mort et tournée vers le responsable ;
-- la réapparition finale par `spawnCommand`.
+- le Totem d'immortalité (tout objet portant le composant `death_protection`), sauf pour les dégâts qui traversent l'invulnérabilité (vide, `/kill`) ;
+- la Malédiction de disparition (détruit l'objet), sans `keepInventory` ;
+- les drops, `keepInventory`, les statistiques et le tueur (`getKiller()`), avec un vrai `PlayerDeathEvent` portant la vraie source de dégâts ;
+- une perte d'exp de `expLossPercentage` %, lâchée au sol.
 
-`immediate_respawn` est activée par le plugin dans ces mondes (le client réapparaît sans écran de mort) et remise à `false` à l'arrêt ou si le monde sort de la liste. Un client qui l'ignorerait est réapparu par le serveur au bout de 5 ticks. Clients de la 1.19.4 à la dernière version (via ViaVersion).
+Puis `spectatingDuration` secondes en spectateur, caméra fixée au point de la mort et tournée vers le responsable, et la réapparition par `spawnCommand`. Un joueur mort ne peut être téléporté que par le plugin : les téléportations des autres plugins sont refusées jusqu'à sa réapparition. Clients de la 1.19.4 à la dernière version (via ViaVersion).
 
 ## Mode réseau
 

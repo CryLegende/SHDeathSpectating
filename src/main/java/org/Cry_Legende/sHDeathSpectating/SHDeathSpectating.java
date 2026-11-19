@@ -4,9 +4,17 @@ import org.Cry_Legende.sHDeathSpectating.network.DeathDatabase;
 import org.Cry_Legende.sHDeathSpectating.network.NetworkDeaths;
 import org.Cry_Legende.sHDeathSpectating.network.NetworkLink;
 import org.Cry_Legende.sHDeathSpectating.network.ShNetworkLink;
-import com.destroystokyo.paper.event.player.PlayerPostRespawnEvent;
+import io.papermc.paper.datacomponent.DataComponentTypes;
+import io.papermc.paper.datacomponent.item.DeathProtection;
+import io.papermc.paper.datacomponent.item.consumable.ConsumeEffect;
+import org.bukkit.damage.DamageSource;
+import org.bukkit.event.entity.EntityResurrectEvent;
+import org.bukkit.inventory.EquipmentSlot;
+import org.bukkit.potion.PotionEffectType;
+import org.bukkit.tag.DamageTypeTags;
 import com.destroystokyo.paper.event.player.PlayerStartSpectatingEntityEvent;
 import com.destroystokyo.paper.event.player.PlayerStopSpectatingEntityEvent;
+import net.kyori.adventure.text.Component;
 import org.bukkit.*;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
@@ -16,21 +24,24 @@ import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.ArmorStand;
 import org.bukkit.entity.Entity;
+import org.bukkit.entity.ExperienceOrb;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
-import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
+import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.player.PlayerCommandPreprocessEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
-import org.bukkit.event.player.PlayerRespawnEvent;
 import org.bukkit.event.player.PlayerToggleSneakEvent;
 import org.bukkit.event.vehicle.VehicleExitEvent;
-import org.bukkit.event.world.WorldLoadEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.player.PlayerTeleportEvent;
+import org.bukkit.enchantments.Enchantment;
+import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.PlayerInventory;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.bukkit.potion.PotionEffect;
 import org.bukkit.scheduler.BukkitRunnable;
 
 import java.io.File;
@@ -41,6 +52,7 @@ import java.nio.file.Files;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.logging.Level;
 
 public class SHDeathSpectating extends JavaPlugin implements Listener {
@@ -50,10 +62,6 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
      * mondes sont aussi des fils de tick : Bukkit.isPrimaryThread() y répond vrai, il ne sert donc pas à les distinguer.
      */
     private static volatile Thread serverThread;
-
-    /** Où et par qui un joueur est mort, gardé jusqu'à sa réapparition sur place. */
-    private record DeathInfo(Location location, Entity attacker) {
-    }
 
     /** Vrai uniquement sur le fil principal du serveur (jamais sur le fil d'un monde ou d'une région). */
     public static boolean onServerThread() {
@@ -71,7 +79,7 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
     private volatile String commandBlockedMessage;
     private volatile Sound deathSound;
     private volatile Set<String> worldWhitelist;
-    // Lues et écrites aussi depuis le thread d'un monde (mort pendant son tick), d'où les collections concurrentes.
+    // Lues et écrites aussi depuis le thread d'un monde (dégâts reçus pendant son tick), d'où les collections concurrentes.
     private final Map<UUID, Location> playerLocations = new ConcurrentHashMap<>();
     private final Map<UUID, Entity> playerAttackers = new ConcurrentHashMap<>();
     private final Map<UUID, BukkitRunnable> respawnTasks = new ConcurrentHashMap<>();
@@ -82,10 +90,8 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
     private volatile boolean selfTeleport = false;
     private final Map<UUID, Float> lastPlayerYaw = new ConcurrentHashMap<>();
     private final Map<UUID, Float> lastPlayerPitch = new ConcurrentHashMap<>();
-    // Morts réelles, entre l'événement de mort et la fin de la réapparition immédiate
-    private final Map<UUID, DeathInfo> awaitingRespawn = new ConcurrentHashMap<>();
-    // Mondes (UID) où le plugin a activé immediate_respawn alors qu'elle était fausse : rendue à l'arrêt
-    private final Set<UUID> immediateRespawnEnabled = ConcurrentHashMap.newKeySet();
+    // Morts en attente du thread principal : un second coup mortel dans le même tick ne les relance pas.
+    private final Set<UUID> pendingDeaths = ConcurrentHashMap.newKeySet();
     private File spectatingFile;
     private FileConfiguration spectatingConfig;
     // Écritures de spectating.yml : numérotées pour qu'une ancienne n'écrase pas une plus récente
@@ -106,7 +112,6 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
         loadMessages();
         Bukkit.getPluginManager().registerEvents(this, this);
         createSpectatingFile();
-        syncImmediateRespawn();
         enableNetwork();
     }
 
@@ -118,7 +123,6 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
             stand.remove();
         }
         playerStands.clear();
-        restoreImmediateRespawn();
         if (network != null) {
             network.stop();
         } else if (spectatingConfig != null) {
@@ -345,7 +349,6 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
         }
         reloadConfig();
         loadConfiguration();
-        syncImmediateRespawn();
         messages = newMessages;
         sender.sendMessage(message("reload-ok"));
         if (!networkSettings().equals(networkSettingsAtStart)) {
@@ -479,158 +482,229 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
         }
     }
 
-    /**
-     * Vraie mort d'un joueur d'un monde de worldWhitelist : le jeu fait tout (totem, Disparition, keepInventory, drops,
-     * statistiques, responsable de la mort). Ici : pas de message de mort, perte d'exp selon la configuration, et on
-     * retient où et par qui, pour réapparaître sur place en spectateur.
-     */
-    @EventHandler(priority = EventPriority.HIGHEST)
-    public void onPlayerDeath(PlayerDeathEvent event) {
-        Player player = event.getEntity();
+    @EventHandler
+    public void onEntityDamage(EntityDamageEvent event) {
+        if (event.isCancelled()) return;
+        if (!(event.getEntity() instanceof Player)) return;
+
+        final Player player = (Player) event.getEntity();
         if (!worldWhitelist.contains(player.getWorld().getName())) return;
 
-        event.deathMessage(null);
-        if (!event.getKeepLevel()) {
-            int total = player.calculateTotalExperiencePoints();
-            int lost = (int) (total * (expLossPercentage / 100.0));
-            int kept = total - lost;
-            int level = 0;
-            int rest = kept;
-            while (rest >= getExpAtLevel(level)) {
-                rest -= getExpAtLevel(level);
-                level++;
+        if (player.getHealth() - event.getFinalDamage() <= 0) {
+            event.setCancelled(true);
+            final DamageSource source = event.getDamageSource();
+            if (onServerThread()) {
+                resolveLethalDamage(player, source);
+                return;
             }
-            event.setDroppedExp(lost);
-            event.setNewTotalExp(kept);
-            event.setNewLevel(level);
-            event.setNewExp(rest);
-        }
-        awaitingRespawn.put(player.getUniqueId(), new DeathInfo(player.getLocation().clone(), event.getDamageSource().getCausingEntity()));
-
-        // Le client réapparaît seul grâce à immediate_respawn ; ce filet couvre un client qui l'ignorerait (Bedrock)
-        Bukkit.getScheduler().runTaskLater(this, () -> {
-            if (player.isOnline() && player.isDead()) {
-                player.spigot().respawn();
-            }
-        }, 5L);
-    }
-
-    /** La réapparition se fait là où le joueur est mort : c'est de là que la caméra de spectateur regarde. */
-    @EventHandler(priority = EventPriority.HIGHEST)
-    public void onPlayerRespawn(PlayerRespawnEvent event) {
-        DeathInfo info = awaitingRespawn.get(event.getPlayer().getUniqueId());
-        if (info != null) {
-            event.setRespawnLocation(info.location());
+            // Dégâts reçus pendant le tick d'un monde : la mort (gamemode, caméra, inventaire, événement de mort) passe par le thread principal
+            UUID playerId = player.getUniqueId();
+            if (!pendingDeaths.add(playerId)) return;
+            Bukkit.getScheduler().runTask(this, () -> {
+                pendingDeaths.remove(playerId);
+                if (player.isOnline()) {
+                    resolveLethalDamage(player, source);
+                }
+            });
         }
     }
 
-    @EventHandler
-    public void onPlayerPostRespawn(PlayerPostRespawnEvent event) {
-        Player player = event.getPlayer();
-        DeathInfo info = awaitingRespawn.remove(player.getUniqueId());
-        if (info == null) return;
-        // Passage en spectateur dans le même tick que la réapparition quand on est sur le fil principal
-        runOnServerThread(() -> {
-            if (player.isOnline()) {
-                startSpectating(player, info);
-            }
-        });
-    }
-
-    private void runOnServerThread(Runnable task) {
-        if (onServerThread()) {
-            task.run();
-        } else {
-            Bukkit.getScheduler().runTask(this, task);
-        }
-    }
-
-    private void startSpectating(Player player, DeathInfo info) {
-        UUID playerId = player.getUniqueId();
-        // Une mort pendant le spectateur (/kill) ne doit pas laisser l'ancienne caméra dans le monde
-        ArmorStand previous = playerStands.remove(playerId);
-        if (previous != null) {
-            previous.eject();
-            previous.remove();
-        }
-
-        // Un autre plugin a pu choisir un autre point de réapparition : la caméra se pose là où le joueur est mort
-        Location here = player.getLocation();
-        Location death = info.location();
-        if (!death.getWorld().equals(here.getWorld()) || here.distanceSquared(death) > 1.0) {
-            teleportSelf(player, death);
-        }
-        player.setGameMode(GameMode.SPECTATOR);
-        sendMaskedGameMode(player); // écrase, côté client seulement, le GM3 que setGameMode vient de diffuser
-        player.sendTitle("", deathSubtitle, 10, 70, 20);
-        playerLocations.put(playerId, info.location());
-        player.playSound(player.getLocation(), deathSound, 1.0f, 1.0f);
-        if (info.attacker() != null) {
-            playerAttackers.put(playerId, info.attacker());
-        }
-
-        player.sendMessage(deathMessage.replace("{time}", String.valueOf(spectatingDuration / 20)));
-        immobilizePlayer(player); // Cette méthode s'occupe de l'ArmorStand et du spectating
-        markDead(playerId);
+    /** Coup mortel annulé en amont : la protection de mort (totem) passe avant la mort, comme en vanilla. Fil principal. */
+    private void resolveLethalDamage(Player player, DamageSource source) {
+        if (tryDeathProtection(player, source)) return;
+        handlePlayerDeath(player, source);
         scheduleRespawnAndFollowTasks(player);
     }
 
     /**
-     * Active immediate_respawn dans les mondes de worldWhitelist, pour que le client réapparaisse sans écran de mort,
-     * et la rend à son état d'origine dans les autres mondes ou à l'arrêt du plugin.
+     * Protection de mort vanilla, refaite ici puisque le coup mortel est annulé avant que le jeu ne la teste : objet porteur
+     * du composant death_protection en main puis en main secondaire (le Totem d'immortalité, mais aussi tout objet qui
+     * le reçoit), sauf pour les dégâts qui traversent l'invulnérabilité (vide, /kill). EntityResurrectEvent est appelé
+     * dans tous les cas, annulé d'office sans objet, pour qu'un autre plugin puisse sauver le joueur.
      */
-    private void syncImmediateRespawn() {
-        for (World world : Bukkit.getWorlds()) {
-            syncImmediateRespawn(world);
-        }
-    }
+    private boolean tryDeathProtection(Player player, DamageSource source) {
+        if (DamageTypeTags.BYPASSES_INVULNERABILITY.isTagged(source.getDamageType())) return false;
 
-    private void syncImmediateRespawn(World world) {
-        UUID id = world.getUID();
-        if (worldWhitelist.contains(world.getName())) {
-            if (!Boolean.TRUE.equals(world.getGameRuleValue(GameRules.IMMEDIATE_RESPAWN))) {
-                immediateRespawnEnabled.add(id);
-                world.setGameRule(GameRules.IMMEDIATE_RESPAWN, true);
-            }
-        } else if (immediateRespawnEnabled.remove(id)) {
-            world.setGameRule(GameRules.IMMEDIATE_RESPAWN, false);
-        }
-    }
-
-    private void restoreImmediateRespawn() {
-        for (UUID id : immediateRespawnEnabled) {
-            World world = Bukkit.getWorld(id);
-            if (world != null) {
-                world.setGameRule(GameRules.IMMEDIATE_RESPAWN, false);
+        PlayerInventory inventory = player.getInventory();
+        EquipmentSlot slot = null;
+        ItemStack held = null;
+        DeathProtection protection = null;
+        for (EquipmentSlot hand : new EquipmentSlot[]{EquipmentSlot.HAND, EquipmentSlot.OFF_HAND}) {
+            ItemStack item = inventory.getItem(hand);
+            if (item.getType().isAir()) continue;
+            DeathProtection found = item.getData(DataComponentTypes.DEATH_PROTECTION);
+            if (found != null) {
+                slot = hand;
+                held = item.clone();
+                protection = found;
+                break;
             }
         }
-        immediateRespawnEnabled.clear();
+
+        EntityResurrectEvent resurrect = slot == null ? new EntityResurrectEvent(player) : new EntityResurrectEvent(player, slot);
+        resurrect.setCancelled(protection == null);
+        Bukkit.getPluginManager().callEvent(resurrect);
+        if (resurrect.isCancelled()) return false;
+
+        if (held != null) {
+            held.setAmount(held.getAmount() - 1);
+            inventory.setItem(slot, held.getAmount() > 0 ? held : null);
+            player.incrementStatistic(Statistic.USE_ITEM, held.getType());
+        }
+        player.setHealth(1.0);
+        if (protection != null) {
+            for (ConsumeEffect effect : protection.deathEffects()) {
+                applyDeathEffect(player, effect);
+            }
+        }
+        player.playEffect(EntityEffect.PROTECTED_FROM_DEATH);
+        return true;
     }
 
-    @EventHandler
-    public void onWorldLoad(WorldLoadEvent event) {
-        syncImmediateRespawn(event.getWorld());
-    }
-
-    /** Un spectateur mort ne peut ni changer de caméra ni la quitter. */
-    @EventHandler
-    public void onStartSpectating(PlayerStartSpectatingEntityEvent event) {
-        ArmorStand stand = playerStands.get(event.getPlayer().getUniqueId());
-        if (stand != null && !stand.equals(event.getNewSpectatorTarget())) {
-            event.setCancelled(true);
+    /** Effets du composant death_protection ; le téléport aléatoire (fruit de chorus) n'existe pas sur le totem vanilla. */
+    private static void applyDeathEffect(Player player, ConsumeEffect effect) {
+        if (effect instanceof ConsumeEffect.ClearAllStatusEffects) {
+            for (PotionEffect active : player.getActivePotionEffects()) {
+                player.removePotionEffect(active.getType());
+            }
+        } else if (effect instanceof ConsumeEffect.ApplyStatusEffects apply) {
+            if (ThreadLocalRandom.current().nextFloat() < apply.probability()) {
+                player.addPotionEffects(apply.effects());
+            }
+        } else if (effect instanceof ConsumeEffect.RemoveStatusEffects remove) {
+            for (PotionEffectType type : remove.removeEffects().resolve(Registry.EFFECT)) {
+                player.removePotionEffect(type);
+            }
+        } else if (effect instanceof ConsumeEffect.PlaySound sound) {
+            player.getWorld().playSound(player.getLocation(), sound.sound().asString(), SoundCategory.PLAYERS, 1.0f, 1.0f);
         }
     }
 
-    @EventHandler
-    public void onStopSpectating(PlayerStopSpectatingEntityEvent event) {
-        ArmorStand stand = playerStands.get(event.getPlayer().getUniqueId());
-        if (stand != null && stand.equals(event.getSpectatorTarget())) {
-            event.setCancelled(true);
+    private void handlePlayerDeath(Player player, DamageSource source) {
+        player.setGameMode(GameMode.SPECTATOR);
+        sendMaskedGameMode(player); // écrase, côté client seulement, le GM3 que setGameMode vient de diffuser
+        player.sendTitle("", deathSubtitle, 10, 70, 20);
+        playerLocations.put(player.getUniqueId(), player.getLocation());
+        player.playSound(player.getLocation(), deathSound, 1.0f, 1.0f);
+
+        player.setStatistic(Statistic.DEATHS, player.getStatistic(Statistic.DEATHS) + 1);
+        // Responsable du coup mortel (le tireur pour une flèche) : la caméra se tourne vers lui
+        Entity attacker = source.getCausingEntity();
+        if (attacker != null) {
+            playerAttackers.put(player.getUniqueId(), attacker);
+        } else {
+            playerAttackers.remove(player.getUniqueId());
+        }
+        if (attacker instanceof Player attackerPlayer) {
+            attackerPlayer.setStatistic(Statistic.PLAYER_KILLS, attackerPlayer.getStatistic(Statistic.PLAYER_KILLS) + 1);
+            // Les plugins qui lisent getKiller() sur l'événement de mort (hologramme) y retrouvent le tueur
+            player.setKiller(attackerPlayer);
+        }
+
+        // Comme en vanilla : sans keepInventory, la Malédiction de disparition détruit l'objet au lieu de le lâcher.
+        // La mort réelle étant annulée, ce passage vanilla n'a pas lieu : il est refait ici, avant la liste des drops.
+        if (!player.getWorld().getGameRuleValue(GameRules.KEEP_INVENTORY)) {
+            destroyVanishingItems(player.getInventory());
+        }
+
+        List<ItemStack> playerInventoryItems = new ArrayList<>();
+        // getContents() renvoie aussi l'armure et la main secondaire, ajoutées plus bas : on ne prend que le stockage
+        for (ItemStack item : player.getInventory().getStorageContents()) {
+            if (item != null && item.getType() != Material.AIR) {
+                playerInventoryItems.add(item.clone());
+            }
+        }
+        for (ItemStack armorItem : player.getInventory().getArmorContents()) {
+            if (armorItem != null && armorItem.getType() != Material.AIR) {
+                playerInventoryItems.add(armorItem.clone());
+            }
+        }
+        ItemStack offHandItem = player.getInventory().getItemInOffHand();
+        if (offHandItem != null && offHandItem.getType() != Material.AIR) {
+            playerInventoryItems.add(offHandItem.clone());
+        }
+
+        int totalExp = getTotalExperience(player);
+        int expToDropBasedOnConfig = (int) (totalExp * (expLossPercentage / 100.0));
+        PlayerDeathEvent deathEvent = createDeathEvent(player, playerInventoryItems, source);
+        if (!player.getWorld().getGameRuleValue(GameRules.KEEP_INVENTORY)) {
+            deathEvent.setDroppedExp(expToDropBasedOnConfig);
+        }
+
+        Location playerDeathLocation = player.getLocation().clone();
+        Bukkit.getPluginManager().callEvent(deathEvent);
+
+        player.sendMessage(deathMessage.replace("{time}", String.valueOf(spectatingDuration / 20)));
+        immobilizePlayer(player); // Cette méthode s'occupe de l'ArmorStand et du spectating
+
+        boolean effectiveKeepInventory = player.getWorld().getGameRuleValue(GameRules.KEEP_INVENTORY) || deathEvent.getKeepInventory();
+
+        if (!effectiveKeepInventory) {
+            if (!deathEvent.getDrops().isEmpty()) {
+                for (ItemStack itemToDrop : deathEvent.getDrops()) {
+                    if (itemToDrop != null && itemToDrop.getType() != Material.AIR) {
+                        player.getWorld().dropItemNaturally(playerDeathLocation, itemToDrop);
+                    }
+                }
+            }
+            player.getInventory().clear();
+            player.getInventory().setArmorContents(new ItemStack[4]);
+            player.getInventory().setItemInOffHand(null);
+
+            int finalExpToDrop = deathEvent.getDroppedExp();
+            if (finalExpToDrop > 0) {
+                int currentTotalExp = getTotalExperience(player);
+                setTotalExperience(player, Math.max(0, currentTotalExp - finalExpToDrop));
+                ExperienceOrb orb = player.getWorld().spawn(playerDeathLocation, ExperienceOrb.class);
+                orb.setExperience(finalExpToDrop);
+            }
+        } else {
+            deathEvent.getDrops().clear();
+            deathEvent.setDroppedExp(0);
+        }
+
+        markDead(player.getUniqueId());
+    }
+
+    private static boolean vanishesOnDeath(ItemStack item) {
+        return item != null && item.getType() != Material.AIR && item.containsEnchantment(Enchantment.VANISHING_CURSE);
+    }
+
+    /** Retire de l'inventaire (stockage, armure, main secondaire) les objets sous Malédiction de disparition. */
+    private static void destroyVanishingItems(PlayerInventory inventory) {
+        ItemStack[] storage = inventory.getStorageContents();
+        boolean storageChanged = false;
+        for (int i = 0; i < storage.length; i++) {
+            if (vanishesOnDeath(storage[i])) {
+                storage[i] = null;
+                storageChanged = true;
+            }
+        }
+        if (storageChanged) inventory.setStorageContents(storage);
+
+        ItemStack[] armor = inventory.getArmorContents();
+        boolean armorChanged = false;
+        for (int i = 0; i < armor.length; i++) {
+            if (vanishesOnDeath(armor[i])) {
+                armor[i] = null;
+                armorChanged = true;
+            }
+        }
+        if (armorChanged) inventory.setArmorContents(armor);
+
+        if (vanishesOnDeath(inventory.getItemInOffHand())) {
+            inventory.setItemInOffHand(null);
         }
     }
 
     // --- NOUVELLE LOGIQUE D'IMMOBILISATION ET DE SPECTATING ---
     private void immobilizePlayer(Player player) {
+        // Une mort pendant le spectateur (/kill) ne doit pas laisser l'ancienne caméra dans le monde
+        ArmorStand previous = playerStands.remove(player.getUniqueId());
+        if (previous != null) {
+            previous.eject();
+            previous.remove();
+        }
         // Crée une nouvelle variable Location qui est 1.5 bloc au-dessus des pieds du joueur.
         Location spawnLocation = player.getLocation().add(0, 1.5, 0);
         ArmorStand armorStand = player.getWorld().spawn(spawnLocation, ArmorStand.class);
@@ -797,6 +871,7 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
 
         freePlayer(player); // Libère le joueur de l'ArmorStand ET de la vue spectateur
         player.setGameMode(GameMode.SURVIVAL);
+        player.setWalkSpeed(0.2f);
 
         if (this.spawnCommand != null && !this.spawnCommand.isEmpty()) {
             String commandToExecute = this.spawnCommand.replace("%player%", player.getName());
@@ -813,12 +888,47 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
             player.teleport(spawnWorld.getSpawnLocation());
         }
 
+        player.setHealth(player.getAttribute(org.bukkit.attribute.Attribute.MAX_HEALTH).getValue());
+        player.setFoodLevel(20);
+        player.setSaturation(5.0F);
+
+        for (PotionEffect effect : player.getActivePotionEffects()) {
+            player.removePotionEffect(effect.getType());
+        }
+        player.setFireTicks(0);
+
         playerAttackers.remove(player.getUniqueId());
         playerLocations.remove(player.getUniqueId());
         lastPlayerYaw.remove(player.getUniqueId());
         lastPlayerPitch.remove(player.getUniqueId());
 
         clearDead(player.getUniqueId());
+    }
+
+    // Les méthodes utilitaires restent inchangées
+    public void setTotalExperience(Player player, int amount) {
+        player.setExp(0.0F);
+        player.setLevel(0);
+        player.setTotalExperience(0);
+        if (amount > 0) {
+            player.giveExp(amount);
+        }
+    }
+
+    // Événement de mort « de notification » : message vide, le constructeur à message Component remplace celui à String.
+    // La source est celle du coup mortel : les autres plugins y lisent la cause et le responsable de la mort.
+    private static PlayerDeathEvent createDeathEvent(Player player, List<ItemStack> drops, DamageSource source) {
+        return new PlayerDeathEvent(player, source, drops, 0, Component.empty(), true);
+    }
+
+    private int getTotalExperience(Player player) {
+        int level = player.getLevel();
+        int exp = Math.round(getExpAtLevel(level) * player.getExp());
+        while (level > 0) {
+            level--;
+            exp += getExpAtLevel(level);
+        }
+        return exp;
     }
 
     private int getExpAtLevel(int level) {
@@ -874,7 +984,6 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
     public void onPlayerQuit(PlayerQuitEvent event) {
         UUID playerId = event.getPlayer().getUniqueId();
         if (network != null) network.left(playerId);
-        awaitingRespawn.remove(playerId);
         playerAttackers.remove(playerId);
         if (playerLocations.containsKey(playerId)) {
             if (respawnTasks.containsKey(playerId)) respawnTasks.remove(playerId).cancel();
@@ -910,13 +1019,30 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
 
     /**
      * Un joueur mort reste sur sa caméra : toute téléportation qui ne vient pas du plugin est refusée (menu spectateur,
-     * point de réapparition de SuperiorSkyblock, /spawn d'un autre plugin...). Un spectateur sur caméra n'a pas
-     * l'ArmorStand pour véhicule côté serveur, on ne peut donc pas se fier à getVehicle().
+     * /spawn ou téléport d'un autre plugin). Un spectateur sur caméra n'a pas l'ArmorStand pour véhicule côté serveur,
+     * on ne peut donc pas se fier à getVehicle().
      */
     @EventHandler
     public void onPlayerTeleport(PlayerTeleportEvent event) {
         if (selfTeleport || !playerStands.containsKey(event.getPlayer().getUniqueId())) return;
         event.setCancelled(true);
+    }
+
+    /** Un spectateur mort ne peut ni changer de caméra ni la quitter. */
+    @EventHandler
+    public void onStartSpectating(PlayerStartSpectatingEntityEvent event) {
+        ArmorStand stand = playerStands.get(event.getPlayer().getUniqueId());
+        if (stand != null && !stand.equals(event.getNewSpectatorTarget())) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler
+    public void onStopSpectating(PlayerStopSpectatingEntityEvent event) {
+        ArmorStand stand = playerStands.get(event.getPlayer().getUniqueId());
+        if (stand != null && stand.equals(event.getSpectatorTarget())) {
+            event.setCancelled(true);
+        }
     }
 
     // Classe séparée : chargée seulement si packetevents est présent (softdepend).
