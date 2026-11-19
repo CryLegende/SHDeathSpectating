@@ -39,7 +39,9 @@ import org.bukkit.event.player.PlayerToggleSneakEvent;
 import org.bukkit.event.vehicle.VehicleExitEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.player.PlayerTeleportEvent;
+import org.bukkit.enchantments.Enchantment;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.PlayerInventory;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.potion.PotionEffect;
 import org.bukkit.scheduler.BukkitRunnable;
@@ -562,6 +564,12 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
             // La logique d'orientation est maintenant gérée entièrement dans followAttacker
         }
 
+        // Comme en vanilla : sans keepInventory, la Malédiction de disparition détruit l'objet au lieu de le lâcher.
+        // La mort réelle étant annulée, ce passage vanilla n'a pas lieu : il est refait ici, avant la liste des drops.
+        if (!player.getWorld().getGameRuleValue(GameRules.KEEP_INVENTORY)) {
+            destroyVanishingItems(player.getInventory());
+        }
+
         List<ItemStack> playerInventoryItems = new ArrayList<>();
         // getContents() renvoie aussi l'armure et la main secondaire, ajoutées plus bas : on ne prend que le stockage
         for (ItemStack item : player.getInventory().getStorageContents()) {
@@ -619,6 +627,37 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
         }
 
         markDead(player.getUniqueId());
+    }
+
+    private static boolean vanishesOnDeath(ItemStack item) {
+        return item != null && item.getType() != Material.AIR && item.containsEnchantment(Enchantment.VANISHING_CURSE);
+    }
+
+    /** Retire de l'inventaire (stockage, armure, main secondaire) les objets sous Malédiction de disparition. */
+    private static void destroyVanishingItems(PlayerInventory inventory) {
+        ItemStack[] storage = inventory.getStorageContents();
+        boolean storageChanged = false;
+        for (int i = 0; i < storage.length; i++) {
+            if (vanishesOnDeath(storage[i])) {
+                storage[i] = null;
+                storageChanged = true;
+            }
+        }
+        if (storageChanged) inventory.setStorageContents(storage);
+
+        ItemStack[] armor = inventory.getArmorContents();
+        boolean armorChanged = false;
+        for (int i = 0; i < armor.length; i++) {
+            if (vanishesOnDeath(armor[i])) {
+                armor[i] = null;
+                armorChanged = true;
+            }
+        }
+        if (armorChanged) inventory.setArmorContents(armor);
+
+        if (vanishesOnDeath(inventory.getItemInOffHand())) {
+            inventory.setItemInOffHand(null);
+        }
     }
 
     // --- NOUVELLE LOGIQUE D'IMMOBILISATION ET DE SPECTATING ---
