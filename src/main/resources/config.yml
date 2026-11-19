@@ -31,6 +31,7 @@ spawnCommand: spawn %player% # Commande pour la réapparition
 deathMessage: '&7&l« &c&lSH &8&l» &cVous êtes morts&7, réapparition dans &c{time}
   secondes' # Message de mort
 commandBlockedMessage: '&cVous ne pouvez pas exécuter de commandes en étant mort.'
+# Mondes où la mort est remplacée par le spectateur. Le plugin y active immediate_respawn (pas d'écran de mort).
 worldWhitelist:
 - world
 - world_nether

@@ -20,8 +20,19 @@ Utilisé sur : **Opale**.
 
 ## Dépendances
 
-- Obligatoires : `ProtocolLib`
-- Optionnelles : `packetevents`, `SHNetwork` (mode réseau), `HuskSync`
+- Obligatoires : aucune
+- Optionnelles : `packetevents` (masque le menu de choix de joueur du mode spectateur), `SHNetwork` (mode réseau), `HuskSync`
+
+## Fonctionnement
+
+La mort est la vraie : le jeu applique lui-même le Totem d'immortalité, la Malédiction de disparition, `keepInventory`, les drops, les statistiques et le responsable de la mort, et les autres plugins reçoivent un vrai `PlayerDeathEvent`. Le plugin ajoute, dans les mondes de `worldWhitelist` :
+
+- pas de message de mort dans le tchat ;
+- une perte d'exp de `expLossPercentage` % (le reste est gardé), lâchée au sol ;
+- une réapparition immédiate sur place, puis `spectatingDuration` secondes en spectateur, caméra fixée au point de la mort et tournée vers le responsable ;
+- la réapparition finale par `spawnCommand`.
+
+`immediate_respawn` est activée par le plugin dans ces mondes (le client réapparaît sans écran de mort) et remise à `false` à l'arrêt ou si le monde sort de la liste. Un client qui l'ignorerait est réapparu par le serveur au bout de 5 ticks. Clients de la 1.19.4 à la dernière version (via ViaVersion).
 
 ## Mode réseau
 
