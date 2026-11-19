@@ -78,6 +78,8 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
     private final Map<UUID, BukkitRunnable> cameraLockTasks = new ConcurrentHashMap<>();
     private final Map<UUID, ArmorStand> playerStands = new ConcurrentHashMap<>();
     private volatile boolean spectatorMaskFailed = false;
+    // Vrai le temps d'une téléportation voulue par le plugin lui-même : seules celles-là passent pour un joueur mort
+    private volatile boolean selfTeleport = false;
     private final Map<UUID, Float> lastPlayerYaw = new ConcurrentHashMap<>();
     private final Map<UUID, Float> lastPlayerPitch = new ConcurrentHashMap<>();
     // Morts réelles, entre l'événement de mort et la fin de la réapparition immédiate
@@ -552,6 +554,12 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
             previous.remove();
         }
 
+        // Un autre plugin a pu choisir un autre point de réapparition : la caméra se pose là où le joueur est mort
+        Location here = player.getLocation();
+        Location death = info.location();
+        if (!death.getWorld().equals(here.getWorld()) || here.distanceSquared(death) > 1.0) {
+            teleportSelf(player, death);
+        }
         player.setGameMode(GameMode.SPECTATOR);
         sendMaskedGameMode(player); // écrase, côté client seulement, le GM3 que setGameMode vient de diffuser
         player.sendTitle("", deathSubtitle, 10, 70, 20);
@@ -709,6 +717,15 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
         cameraLockTasks.put(playerId, cameraLockTask);
     }
 
+    private void teleportSelf(Player player, Location destination) {
+        selfTeleport = true;
+        try {
+            player.teleport(destination);
+        } finally {
+            selfTeleport = false;
+        }
+    }
+
     // Filet de sécurité : si une téléportation spectateur passe malgré tout (autre plugin,
     // version de serveur différente), le joueur est raccroché à sa caméra au tick suivant.
     private void enforceSpectatorLock(Player player) {
@@ -720,7 +737,7 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
             sendMaskedGameMode(player); // setGameMode vient de rediffuser le vrai GM3 au client
         }
         if (!armorStand.equals(player.getVehicle())) {
-            player.teleport(armorStand.getLocation());
+            teleportSelf(player, armorStand.getLocation());
             armorStand.addPassenger(player);
         }
         if (!armorStand.equals(player.getSpectatorTarget())) {
@@ -891,22 +908,15 @@ public class SHDeathSpectating extends JavaPlugin implements Listener {
         }
     }
 
+    /**
+     * Un joueur mort reste sur sa caméra : toute téléportation qui ne vient pas du plugin est refusée (menu spectateur,
+     * point de réapparition de SuperiorSkyblock, /spawn d'un autre plugin...). Un spectateur sur caméra n'a pas
+     * l'ArmorStand pour véhicule côté serveur, on ne peut donc pas se fier à getVehicle().
+     */
     @EventHandler
     public void onPlayerTeleport(PlayerTeleportEvent event) {
-        Player player = event.getPlayer();
-        if (!playerStands.containsKey(player.getUniqueId())) return;
-
-        // Téléportation demandée par le joueur depuis le menu spectateur : toujours refusée.
-        if (event.getCause() == PlayerTeleportEvent.TeleportCause.SPECTATE) {
-            event.setCancelled(true);
-            return;
-        }
-
-        ArmorStand stand = playerStands.get(player.getUniqueId());
-        // S'assurer que le joueur est bien dans le véhicule qu'on contrôle
-        if (player.getVehicle() != null && player.getVehicle().equals(stand)) {
-            event.setCancelled(true);
-        }
+        if (selfTeleport || !playerStands.containsKey(event.getPlayer().getUniqueId())) return;
+        event.setCancelled(true);
     }
 
     // Classe séparée : chargée seulement si packetevents est présent (softdepend).
